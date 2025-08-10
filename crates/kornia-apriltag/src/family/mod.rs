@@ -25,6 +25,39 @@ pub struct TagFamily {
     pub sharpening_buffer: SharpeningBuffer,
 }
 
+impl TagFamily {
+    /// Creates a new TagFamily with a custom hamming distance for the QuickDecode table.
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - The base TagFamily to modify
+    /// * `hamming_distance` - The maximum hamming distance for error correction (0-3 recommended)
+    ///
+    /// # Returns
+    ///
+    /// A new TagFamily with the specified hamming distance.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use kornia_apriltag::family::TagFamily;
+    ///
+    /// // Create a Tag36H11 family with hamming distance of 1 for faster processing
+    /// let fast_family = TagFamily::with_hamming_distance(TagFamily::tag36_h11(), 1);
+    ///
+    /// // Create a Tag36H11 family with hamming distance of 3 for more robustness
+    /// let robust_family = TagFamily::with_hamming_distance(TagFamily::tag36_h11(), 3);
+    /// ```
+    pub fn with_hamming_distance(mut base: TagFamily, hamming_distance: u8) -> Self {
+        base.quick_decode = QuickDecode::with_hamming_distance(
+            base.nbits,
+            &base.code_data,
+            hamming_distance,
+        );
+        base
+    }
+}
+
 /// Represents a decoded AprilTag.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TagFamilyKind {

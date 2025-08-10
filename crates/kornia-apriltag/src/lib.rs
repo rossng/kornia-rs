@@ -12,7 +12,6 @@ use kornia_imgproc::resize::resize_fast_mono;
 use crate::{
     decoder::{decode_tags, Detection, GrayModelPair},
     errors::AprilTagError,
-    family::{TagFamily, TagFamilyKind},
     quad::{fit_quads, FitQuadConfig},
     segmentation::{find_connected_components, find_gradient_clusters, GradientInfo},
     threshold::{adaptive_threshold, TileMinMax},
@@ -47,11 +46,14 @@ pub mod quad;
 /// Decoding utilities for AprilTag detection.
 pub mod decoder;
 
+// Re-export commonly used types
+pub use family::{TagFamily, TagFamilyKind};
+
 /// Configuration for decoding AprilTags.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodeTagsConfig {
     /// List of tag families to detect.
-    pub tag_families: Vec<TagFamily>,
+    pub tag_families: Vec<crate::TagFamily>,
     /// Configuration for quad fitting.
     pub fit_quad_config: FitQuadConfig,
     /// Whether to enable edge refinement before decoding.
@@ -70,18 +72,75 @@ pub struct DecodeTagsConfig {
     pub downscale_factor: usize,
 }
 
+const DEFAULT_DOWNSCALE_FACTOR: usize = 2;
+
 impl DecodeTagsConfig {
     /// Creates a new `DecodeTagsConfig` with the given tag family kinds.
-    pub fn new(tag_family_kinds: Vec<TagFamilyKind>) -> Self {
-        const DEFAULT_DOWNSCALE_FACTOR: usize = 2;
-
+    pub fn new(tag_family_kinds: Vec<crate::TagFamilyKind>) -> Self {
         let mut tag_families = Vec::with_capacity(tag_family_kinds.len());
         let mut normal_border = false;
         let mut reversed_border = false;
         let mut min_tag_width = usize::MAX;
 
         tag_family_kinds.iter().for_each(|family_kind| {
-            let family: TagFamily = family_kind.into();
+            let family: crate::TagFamily = family_kind.into();
+            if family.width_at_border < min_tag_width {
+                min_tag_width = family.width_at_border;
+            }
+            normal_border |= !family.reversed_border;
+            reversed_border |= family.reversed_border;
+
+            tag_families.push(family);
+        });
+
+        if min_tag_width < 3 {
+            min_tag_width = 3;
+        }
+
+        Self {
+            tag_families,
+            fit_quad_config: Default::default(),
+            normal_border,
+            refine_edges_enabled: true,
+            decode_sharpening: 0.25,
+            reversed_border,
+            min_tag_width,
+            min_white_black_difference: 5,
+            downscale_factor: DEFAULT_DOWNSCALE_FACTOR,
+        }
+    }
+
+    /// Creates a new `DecodeTagsConfig` with the given tag family kinds and hamming distance.
+    ///
+    /// # Arguments
+    ///
+    /// * `tag_family_kinds` - The tag families to use for detection
+    /// * `hamming_distance` - Maximum hamming distance for error correction (0-3 recommended)
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use kornia_apriltag::{DecodeTagsConfig, TagFamilyKind};
+    ///
+    /// // Create config with Tag36H11 using hamming distance of 1 for faster processing
+    /// let config = DecodeTagsConfig::with_hamming_distance(
+    ///     vec![TagFamilyKind::Tag36H11],
+    ///     1
+    /// );
+    /// ```
+    pub fn with_hamming_distance(
+        tag_family_kinds: Vec<crate::TagFamilyKind>,
+        hamming_distance: u8,
+    ) -> Self {
+        let mut tag_families = Vec::with_capacity(tag_family_kinds.len());
+        let mut normal_border = false;
+        let mut reversed_border = false;
+        let mut min_tag_width = usize::MAX;
+
+        tag_family_kinds.iter().for_each(|family_kind| {
+            let base_family: crate::TagFamily = family_kind.into();
+            let family = crate::TagFamily::with_hamming_distance(base_family, hamming_distance);
+
             if family.width_at_border < min_tag_width {
                 min_tag_width = family.width_at_border;
             }
@@ -112,11 +171,20 @@ impl DecodeTagsConfig {
 
     /// Creates a `DecodeTagsConfig` with all supported tag families.
     pub fn all() -> Self {
-        Self::new(TagFamilyKind::all())
+        Self::new(crate::TagFamilyKind::all())
+    }
+
+    /// Creates a `DecodeTagsConfig` with all supported tag families and custom hamming distance.
+    ///
+    /// # Arguments
+    ///
+    /// * `hamming_distance` - Maximum hamming distance for error correction (0-3 recommended)
+    pub fn all_with_hamming_distance(hamming_distance: u8) -> Self {
+        Self::with_hamming_distance(crate::TagFamilyKind::all(), hamming_distance)
     }
 
     /// Adds a tag family to the configuration.
-    pub fn add(&mut self, family: TagFamily) {
+    pub fn add(&mut self, family: crate::TagFamily) {
         if family.width_at_border < self.min_tag_width {
             self.min_tag_width = family.width_at_border;
         }
@@ -147,7 +215,7 @@ impl AprilTagDecoder {
 
     /// Adds a tag family to the decoder configuration.
     #[inline]
-    pub fn add(&mut self, family: TagFamily) {
+    pub fn add(&mut self, family: crate::TagFamily) {
         self.config.add(family);
     }
 
@@ -189,6 +257,40 @@ impl AprilTagDecoder {
             clusters: HashMap::new(),
             gray_model_pair: GrayModelPair::new(),
         })
+    }
+
+    /// Creates a new `AprilTagDecoder` with a custom hamming distance for error correction.
+    ///
+    /// # Arguments
+    ///
+    /// * `tag_family_kinds` - The tag families to use for detection
+    /// * `hamming_distance` - Maximum hamming distance for error correction (0-3 recommended)
+    /// * `img_size` - The size of the image to be processed
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the new `AprilTagDecoder` or an `AprilTagError`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use kornia_apriltag::{AprilTagDecoder, TagFamilyKind};
+    /// use kornia_image::ImageSize;
+    ///
+    /// // Create decoder with hamming distance of 1 for faster processing
+    /// let decoder = AprilTagDecoder::with_hamming_distance(
+    ///     vec![TagFamilyKind::Tag36H11],
+    ///     1,
+    ///     ImageSize { width: 640, height: 480 }
+    /// ).unwrap();
+    /// ```
+    pub fn with_hamming_distance(
+        tag_family_kinds: Vec<crate::TagFamilyKind>,
+        hamming_distance: u8,
+        img_size: ImageSize,
+    ) -> Result<Self, AprilTagError> {
+        let config = DecodeTagsConfig::with_hamming_distance(tag_family_kinds, hamming_distance);
+        Self::new(config, img_size)
     }
 
     /// Decodes AprilTags from the provided grayscale image.
@@ -259,7 +361,7 @@ impl AprilTagDecoder {
     }
 
     /// Returns a slice of tag families configured for detection.
-    pub fn tag_families(&self) -> &[TagFamily] {
+    pub fn tag_families(&self) -> &[crate::TagFamily] {
         &self.config.tag_families
     }
 }

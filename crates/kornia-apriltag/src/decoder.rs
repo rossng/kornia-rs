@@ -124,6 +124,7 @@ impl std::ops::DerefMut for QuickDecode {
 
 impl QuickDecode {
     /// Creates a new `QuickDecode` table for fast lookup of decoded tag codes and their associated metadata.
+    /// Uses a default hamming distance of 2 for backward compatibility.
     ///
     /// # Arguments
     ///
@@ -134,10 +135,49 @@ impl QuickDecode {
     ///
     /// A new `QuickDecode` instance with precomputed entries for all codes and their Hamming neighbors.
     pub fn new(nbits: usize, code_data: &[usize]) -> Self {
+        Self::with_hamming_distance(nbits, code_data, 2)
+    }
+
+    /// Creates a new `QuickDecode` table with a configurable hamming distance.
+    ///
+    /// # Arguments
+    ///
+    /// * `nbits` - Number of bits in the tag code.
+    /// * `code_data` - Slice of code values to populate the table.
+    /// * `max_hamming_distance` - Maximum hamming distance to precompute (0-3 recommended).
+    ///
+    /// # Returns
+    ///
+    /// A new `QuickDecode` instance with precomputed entries for all codes and their Hamming neighbors
+    /// up to the specified distance.
+    ///
+    /// # Notes
+    ///
+    /// - A hamming distance of 0 only accepts exact matches (fastest, least robust).
+    /// - A hamming distance of 1 accepts up to 1 bit error.
+    /// - A hamming distance of 2 accepts up to 2 bit errors (default, good balance).
+    /// - Higher values increase memory usage and initialization time but improve robustness.
+    pub fn with_hamming_distance(nbits: usize, code_data: &[usize], max_hamming_distance: u8) -> Self {
         let ncodes = code_data.len();
-        let capacity = ncodes // Hamming 0
-            + nbits * ncodes // Hamming 1
-            + ncodes * nbits * (nbits - 1); // Hamming 2
+        
+        // Calculate capacity based on requested hamming distance
+        let capacity = match max_hamming_distance {
+            0 => ncodes,
+            1 => ncodes + nbits * ncodes,
+            2 => ncodes + nbits * ncodes + ncodes * nbits * (nbits - 1) / 2,
+            3 => ncodes 
+                + nbits * ncodes 
+                + ncodes * nbits * (nbits - 1) / 2
+                + ncodes * nbits * (nbits - 1) * (nbits - 2) / 6,
+            _ => {
+                // For higher hamming distances, calculate using binomial coefficient
+                let mut total = 0;
+                for h in 0..=max_hamming_distance.min(nbits as u8) {
+                    total += ncodes * Self::binomial_coefficient(nbits, h as usize);
+                }
+                total
+            }
+        };
 
         let mut quick_decode = Self(vec![
             QuickDecodeEntry {
@@ -148,21 +188,101 @@ impl QuickDecode {
         ]);
 
         code_data.iter().enumerate().for_each(|(i, code)| {
+            // Hamming 0: exact match
             quick_decode.add(*code, i as u16, 0);
 
-            // add hamming 1
-            (0..nbits).for_each(|j| {
-                quick_decode.add(code ^ (1 << j), i as u16, 1);
-            });
-
-            // add hamming 2
-            (0..nbits).for_each(|j| {
-                (0..j).for_each(|k| {
-                    quick_decode.add(code ^ (1 << j) ^ (1 << k), i as u16, 2);
+            if max_hamming_distance >= 1 {
+                // Hamming 1: single bit errors
+                (0..nbits).for_each(|j| {
+                    quick_decode.add(code ^ (1 << j), i as u16, 1);
                 });
-            });
+            }
+
+            if max_hamming_distance >= 2 {
+                // Hamming 2: two bit errors
+                (0..nbits).for_each(|j| {
+                    (0..j).for_each(|k| {
+                        quick_decode.add(code ^ (1 << j) ^ (1 << k), i as u16, 2);
+                    });
+                });
+            }
+
+            if max_hamming_distance >= 3 {
+                // Hamming 3: three bit errors
+                (0..nbits).for_each(|j| {
+                    (0..j).for_each(|k| {
+                        (0..k).for_each(|l| {
+                            quick_decode.add(code ^ (1 << j) ^ (1 << k) ^ (1 << l), i as u16, 3);
+                        });
+                    });
+                });
+            }
+
+            // For hamming distances > 3, use recursive generation (rarely needed)
+            if max_hamming_distance > 3 {
+                Self::generate_hamming_codes(
+                    &mut quick_decode,
+                    *code,
+                    i as u16,
+                    nbits,
+                    max_hamming_distance,
+                    4,
+                    0,
+                    0,
+                );
+            }
         });
         quick_decode
+    }
+
+    /// Helper function to calculate binomial coefficient (n choose k).
+    fn binomial_coefficient(n: usize, k: usize) -> usize {
+        if k > n {
+            return 0;
+        }
+        if k == 0 || k == n {
+            return 1;
+        }
+        
+        let k = k.min(n - k); // Take advantage of symmetry
+        let mut result = 1;
+        for i in 0..k {
+            result = result * (n - i) / (i + 1);
+        }
+        result
+    }
+
+    /// Recursive helper to generate codes with hamming distance > 3.
+    fn generate_hamming_codes(
+        quick_decode: &mut QuickDecode,
+        base_code: usize,
+        id: u16,
+        nbits: usize,
+        max_hamming: u8,
+        current_hamming: u8,
+        start_bit: usize,
+        current_code: usize,
+    ) {
+        if current_hamming > max_hamming {
+            return;
+        }
+
+        if current_hamming > 3 {
+            quick_decode.add(base_code ^ current_code, id, current_hamming);
+        }
+
+        for bit in start_bit..nbits {
+            Self::generate_hamming_codes(
+                quick_decode,
+                base_code,
+                id,
+                nbits,
+                max_hamming,
+                current_hamming + 1,
+                bit + 1,
+                current_code ^ (1 << bit),
+            );
+        }
     }
 
     /// Adds a new entry to the quick decode table.

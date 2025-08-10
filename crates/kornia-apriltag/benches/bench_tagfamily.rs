@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use apriltag::DetectorBuilder;
 use criterion::{criterion_group, criterion_main, Criterion};
 use kornia_apriltag::{family::TagFamilyKind, AprilTagDecoder, DecodeTagsConfig};
@@ -169,6 +171,62 @@ fn bench_tagfamily(c: &mut Criterion) {
                         .build()
                         .unwrap(),
                 );
+            });
+        });
+    }
+
+    // Benchmark different hamming distances for Tag36H11
+    {
+        let mut group = c.benchmark_group("Tag36H11-HammingDistance");
+
+        group.bench_function("hamming-0", |b| {
+            b.iter(|| {
+                let config =
+                    DecodeTagsConfig::with_hamming_distance(vec![TagFamilyKind::Tag36H11], 0);
+                std::hint::black_box(AprilTagDecoder::new(config, IMG_SIZE).unwrap());
+            });
+        });
+
+        group.bench_function("hamming-1", |b| {
+            b.iter(|| {
+                let config =
+                    DecodeTagsConfig::with_hamming_distance(vec![TagFamilyKind::Tag36H11], 1);
+                std::hint::black_box(AprilTagDecoder::new(config, IMG_SIZE).unwrap());
+            });
+        });
+
+        group.bench_function("hamming-2-default", |b| {
+            b.iter(|| {
+                let config =
+                    DecodeTagsConfig::with_hamming_distance(vec![TagFamilyKind::Tag36H11], 2);
+                std::hint::black_box(AprilTagDecoder::new(config, IMG_SIZE).unwrap());
+            });
+        });
+    }
+
+    // Benchmark different hamming distances for TagStandard52H13 (larger tag family)
+    {
+        let mut group = c.benchmark_group("TagStandard52H13-HammingDistance");
+        group.sample_size(10);
+        group.measurement_time(Duration::from_secs(20));
+
+        group.bench_function("hamming-0", |b| {
+            b.iter(|| {
+                let config = DecodeTagsConfig::with_hamming_distance(
+                    vec![TagFamilyKind::TagStandard52H13],
+                    0,
+                );
+                std::hint::black_box(AprilTagDecoder::new(config, IMG_SIZE).unwrap());
+            });
+        });
+
+        group.bench_function("hamming-1", |b| {
+            b.iter(|| {
+                let config = DecodeTagsConfig::with_hamming_distance(
+                    vec![TagFamilyKind::TagStandard52H13],
+                    1,
+                );
+                std::hint::black_box(AprilTagDecoder::new(config, IMG_SIZE).unwrap());
             });
         });
     }
