@@ -1004,6 +1004,59 @@ mod tests {
     }
 
     #[test]
+    fn test_mosaic_detections() -> Result<(), Box<dyn std::error::Error>> {
+        // Test tag detection on mosaic images for each tag family
+        // Each mosaic.png contains all available tags for that family
+        // This test verifies we can detect them (ignoring positions)
+
+        let test_cases = vec![
+            (TagFamilyKind::Tag16H5, "tag16h5", 30),
+            (TagFamilyKind::Tag25H9, "tag25h9", 35),
+            (TagFamilyKind::Tag36H11, "tag36h11", 587),
+            (TagFamilyKind::TagCircle21H7, "tagCircle21h7", 38),
+            (TagFamilyKind::TagCircle49H12, "tagCircle49h12", 999),
+            (TagFamilyKind::TagCustom48H12, "tagCustom48h12", 42211),
+            (TagFamilyKind::TagStandard41H12, "tagStandard41h12", 2115),
+            (TagFamilyKind::TagStandard52H13, "tagStandard52h13", 48714),
+        ];
+
+        for (family_kind, family_name, expected_count) in test_cases {
+            let path = format!("../../tests/data/apriltag-imgs/{}/mosaic.png", family_name);
+
+            let mut config = DecodeTagsConfig::with_hamming_distance(vec![family_kind.clone()], 1);
+            config.downscale_factor = 1;
+
+            let src = kornia_io::png::read_image_png_mono8(&path)?;
+
+            let mut bin = Image::from_size_val(src.size(), Pixel::Skip, CpuAllocator)?;
+            let mut tile_min_max = TileMinMax::new(bin.size(), 4);
+            let mut uf = UnionFind::new(bin.as_slice().len());
+            let mut clusters = HashMap::new();
+            let mut gray_model_pair = GrayModelPair::default();
+
+            adaptive_threshold(&src, &mut bin, &mut tile_min_max, 20)?;
+            find_connected_components(&bin, &mut uf)?;
+            find_gradient_clusters(&bin, &mut uf, &mut clusters);
+
+            let mut quads = fit_quads(&bin, &mut clusters, &config);
+            let tags = decode_tags(&src, &mut quads, &mut config, &mut gray_model_pair);
+
+            // Verify all detected tags are of the correct family
+            for tag in &tags {
+                assert_eq!(tag.tag_family_kind, family_kind,
+                    "Tag family mismatch in {}", family_name);
+            }
+
+            // Verify we detected all expected tags
+            assert_eq!(tags.len(), expected_count,
+                "Expected {} tags for {} but found {}",
+                expected_count, family_name, tags.len());
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_gray_model() {
         let mut gm = GrayModel::default();
 
