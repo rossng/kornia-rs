@@ -379,17 +379,17 @@ fn fit_single_quad<A: ImageAllocator>(
 #[derive(Default, Debug, Clone)]
 struct LineFit {
     /// Weighted sum of x coordinates ($\sum_i w_i x_i$)
-    mx: f32,
+    mx: f64,
     /// Weighted sum of y coordinates ($\sum_i w_i y_i$)
-    my: f32,
+    my: f64,
     /// Weighted sum of squared x coordinates ($\sum_i w_i x_i^2$)
-    mxx: f32,
+    mxx: f64,
     /// Weighted sum of x·y products ($\sum_i w_i x_i y_i$)
-    mxy: f32,
+    mxy: f64,
     /// Weighted sum of squared y coordinates ($\sum_i w_i y_i^2$)
-    myy: f32,
+    myy: f64,
     /// Total weight ($\sum_i w_i$)
-    w: f32,
+    w: f64,
 }
 
 /// Computes prefix sums for weighted line fitting over a set of gradient information points.
@@ -432,8 +432,10 @@ fn compute_line_fit_prefix_sums<A: ImageAllocator>(
             w = ((grad_x * grad_x + grad_y * grad_y) as f32).sqrt() + 1.0;
         }
 
-        let fx = x;
-        let fy = y;
+        // Cast to f64 for precision in accumulation
+        let fx = x as f64;
+        let fy = y as f64;
+        let w = w as f64;
 
         lfps[i].mx += w * fx;
         lfps[i].my += w * fy;
@@ -677,12 +679,12 @@ fn fit_line(
         return;
     }
 
-    let mut mx: f32;
-    let mut my: f32;
-    let mut mxx: f32;
-    let mut myy: f32;
-    let mut mxy: f32;
-    let mut w: f32;
+    let mut mx: f64;
+    let mut my: f64;
+    let mut mxx: f64;
+    let mut myy: f64;
+    let mut mxy: f64;
+    let mut w: f64;
     let n: usize;
 
     if i0 < i1 {
@@ -736,8 +738,8 @@ fn fit_line(
     let eig_small = 0.5 * (cxx + cyy - ((cxx - cyy) * (cxx - cyy) + 4.0 * cxy * cxy).sqrt());
 
     if let Some(lineparm) = lineparm {
-        lineparm[0] = ex;
-        lineparm[1] = ey;
+        lineparm[0] = ex as f32;
+        lineparm[1] = ey as f32;
 
         let eig = 0.5 * (cxx + cyy + ((cxx - cyy) * (cxx - cyy) + 4.0 * cxy * cxy).sqrt());
         let nx1 = cxx - eig;
@@ -747,9 +749,9 @@ fn fit_line(
         let ny2 = cyy - eig;
         let m2 = nx2 * nx2 + ny2 * ny2;
 
-        let nx: f32;
-        let ny: f32;
-        let m: f32;
+        let nx: f64;
+        let ny: f64;
+        let m: f64;
 
         if m1 > m2 {
             nx = nx1;
@@ -767,17 +769,17 @@ fn fit_line(
             lineparm[2] = 0.0;
             lineparm[3] = 0.0;
         } else {
-            lineparm[2] = nx / length;
-            lineparm[3] = ny / length;
+            lineparm[2] = (nx / length) as f32;
+            lineparm[3] = (ny / length) as f32;
         }
     }
 
     if let Some(err) = err {
-        *err = n as f32 * eig_small;
+        *err = (n as f64 * eig_small) as f32;
     }
 
     if let Some(mse) = mse {
-        *mse = eig_small;
+        *mse = eig_small as f32;
     }
 }
 
@@ -938,9 +940,9 @@ mod tests {
                 lfp = lfps[i - 1].clone();
             }
 
-            let x = i as f32;
-            let y = i as f32;
-            let w = 1.0f32;
+            let x = i as f64;
+            let y = i as f64;
+            let w = 1.0f64;
 
             lfp.mx += w * x;
             lfp.my += w * y;
@@ -1087,12 +1089,12 @@ mod tests {
         assert_eq!(lfps.len(), 3);
         // The last element should be the sum of all previous
         let last = &lfps[2];
-        let mut sum_x = 0.0;
-        let mut sum_y = 0.0;
-        let mut sum_w = 0.0;
+        let mut sum_x = 0.0f64;
+        let mut sum_y = 0.0f64;
+        let mut sum_w = 0.0f64;
         for GradientInfo { pos, .. } in gradient_infos.iter().take(3) {
-            let x = pos.x as f32 * 0.5 + 0.5;
-            let y = pos.y as f32 * 0.5 + 0.5;
+            let x = pos.x as f64 * 0.5 + 0.5;
+            let y = pos.y as f64 * 0.5 + 0.5;
             sum_x += x;
             sum_y += y;
             sum_w += 1.0;
