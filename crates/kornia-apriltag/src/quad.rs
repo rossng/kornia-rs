@@ -258,11 +258,11 @@ fn fit_single_quad<A: ImageAllocator>(
 
     cluster.sort_by(|a, b| a.slope.total_cmp(&b.slope));
 
-    let lfps = compute_line_fit_prefix_sums(src, cluster);
+    let lfps = compute_line_fit_prefix_sums(src, cluster, cx as f64, cy as f64);
 
     let mut indices = [0usize; 4];
 
-    if !quad_segment_maxima(cluster, &lfps, &mut indices, config) {
+    if !quad_segment_maxima(cluster, &lfps, &mut indices, cx as f64, cy as f64, config) {
         return None;
     }
 
@@ -273,7 +273,7 @@ fn fit_single_quad<A: ImageAllocator>(
         let i1 = indices[(i + 1) & 3];
 
         let mut mse = 0.0f32;
-        fit_line(&lfps, i0, i1, Some(&mut lines[i]), None, Some(&mut mse));
+        fit_line(&lfps, i0, i1, cx as f64, cy as f64, Some(&mut lines[i]), None, Some(&mut mse));
 
         if mse > config.max_line_fit_mse {
             return ControlFlow::Break(());
@@ -394,17 +394,23 @@ struct LineFit {
 
 /// Computes prefix sums for weighted line fitting over a set of gradient information points.
 ///
+/// Uses centered coordinates to avoid numerical precision issues when computing covariances.
+///
 /// # Arguments
 ///
 /// * `src` - The source image.
 /// * `gradient_infos` - A slice of `GradientInfo` representing the cluster.
+/// * `cx` - Center x coordinate to subtract from all points for numerical stability.
+/// * `cy` - Center y coordinate to subtract from all points for numerical stability.
 ///
 /// # Returns
 ///
-/// A vector of `LineFit` structures containing prefix sums for each point.
+/// A vector of `LineFit` structures containing prefix sums for each point (in centered coordinates).
 fn compute_line_fit_prefix_sums<A: ImageAllocator>(
     src: &Image<Pixel, 1, A>,
     gradient_infos: &[GradientInfo],
+    cx: f64,
+    cy: f64,
 ) -> Vec<LineFit> {
     let src_slice = src.as_slice();
     // TODO: Find a way to avoid allocation
@@ -416,10 +422,10 @@ fn compute_line_fit_prefix_sums<A: ImageAllocator>(
         }
 
         let delta = 0.5f32;
-        let x = cluster.pos.x as f32 * 0.5 + delta;
-        let y = cluster.pos.y as f32 * 0.5 + delta;
-        let ix = x as usize;
-        let iy = y as usize;
+        let x_abs = cluster.pos.x as f32 * 0.5 + delta;
+        let y_abs = cluster.pos.y as f32 * 0.5 + delta;
+        let ix = x_abs as usize;
+        let iy = y_abs as usize;
         let mut w = 1.0f32;
 
         if ix > 0 && ix + 1 < src.width() && iy > 0 && iy + 1 < src.height() {
@@ -432,9 +438,9 @@ fn compute_line_fit_prefix_sums<A: ImageAllocator>(
             w = ((grad_x * grad_x + grad_y * grad_y) as f32).sqrt() + 1.0;
         }
 
-        // Cast to f64 for precision in accumulation
-        let fx = x as f64;
-        let fy = y as f64;
+        // Center coordinates for numerical stability
+        let fx = x_abs as f64 - cx;
+        let fy = y_abs as f64 - cy;
         let w = w as f64;
 
         lfps[i].mx += w * fx;
@@ -457,8 +463,10 @@ fn compute_line_fit_prefix_sums<A: ImageAllocator>(
 /// # Arguments
 ///
 /// * `gradient_infos` - Slice of `GradientInfo` representing the cluster.
-/// * `lfps` - Slice of `LineFit` prefix sums for the cluster.
+/// * `lfps` - Slice of `LineFit` prefix sums for the cluster (in centered coordinates).
 /// * `indices` - Mutable reference to an array where the four corner indices will be written.
+/// * `cx` - Center x coordinate (for line fitting).
+/// * `cy` - Center y coordinate (for line fitting).
 /// * `config` - Configuration for quad fitting process
 ///
 /// # Returns
@@ -468,6 +476,8 @@ fn quad_segment_maxima(
     gradient_infos: &[GradientInfo],
     lfps: &[LineFit],
     indices: &mut [usize; 4],
+    cx: f64,
+    cy: f64,
     config: &FitQuadConfig,
 ) -> bool {
     // TODO: check if the length of gradient_infos and lfps is same
@@ -486,6 +496,8 @@ fn quad_segment_maxima(
             lfps,
             (i + len - window_size) % len,
             (i + window_size) % len,
+            cx,
+            cy,
             None,
             errors.get_mut(i),
             None,
@@ -578,6 +590,8 @@ fn quad_segment_maxima(
                 lfps,
                 i0,
                 i1,
+                cx,
+                cy,
                 Some(&mut params01),
                 Some(&mut err01),
                 Some(&mut mse01),
@@ -594,6 +608,8 @@ fn quad_segment_maxima(
                     lfps,
                     i1,
                     i2,
+                    cx,
+                    cy,
                     Some(&mut params12),
                     Some(&mut err12),
                     Some(&mut mse12),
@@ -611,13 +627,13 @@ fn quad_segment_maxima(
                 ((m2 + 1)..nmaxima).for_each(|m3| {
                     let i3 = maxima[m3];
 
-                    fit_line(lfps, i2, i3, None, Some(&mut err23), Some(&mut mse23));
+                    fit_line(lfps, i2, i3, cx, cy, None, Some(&mut err23), Some(&mut mse23));
 
                     if mse23 > config.max_line_fit_mse {
                         return;
                     }
 
-                    fit_line(lfps, i3, i0, None, Some(&mut err30), Some(&mut mse30));
+                    fit_line(lfps, i3, i0, cx, cy, None, Some(&mut err30), Some(&mut mse30));
 
                     if mse30 > config.max_line_fit_mse {
                         return;
@@ -660,17 +676,21 @@ fn quad_segment_maxima(
 ///
 /// # Arguments
 ///
-/// * `lfps` - Slice of `LineFit` prefix sums for the points.
+/// * `lfps` - Slice of `LineFit` prefix sums for the points (in centered coordinates).
 /// * `i0` - Start index of the segment (inclusive).
 /// * `i1` - End index of the segment (inclusive).
+/// * `cx` - Center x coordinate (to transform centroid back to absolute coordinates).
+/// * `cy` - Center y coordinate (to transform centroid back to absolute coordinates).
 /// * `lineparm` - Optional mutable reference to an array where the line parameters will be written.
-///   The array is [ex, ey, nx, ny], where (ex, ey) is the centroid and (nx, ny) is the direction.
+///   The array is [ex, ey, nx, ny], where (ex, ey) is the centroid (in absolute coordinates) and (nx, ny) is the direction.
 /// * `err` - Optional mutable reference to a float where the error will be written.
 /// * `mse` - Optional mutable reference to a float where the mean squared error will be written.
 fn fit_line(
     lfps: &[LineFit],
     i0: usize,
     i1: usize,
+    cx: f64,
+    cy: f64,
     lineparm: Option<&mut [f32; 4]>,
     err: Option<&mut f32>,
     mse: Option<&mut f32>,
@@ -729,17 +749,21 @@ fn fit_line(
         return;
     }
 
-    let ex = mx / w;
-    let ey = my / w;
-    let cxx = mxx / w - ex * ex;
-    let cxy = mxy / w - ex * ey;
-    let cyy = myy / w - ey * ey;
+    // Compute centroid in centered coordinate system
+    let ex_centered = mx / w;
+    let ey_centered = my / w;
+
+    // Covariance matrix (now numerically stable since coordinates are centered)
+    let cxx = mxx / w - ex_centered * ex_centered;
+    let cxy = mxy / w - ex_centered * ey_centered;
+    let cyy = myy / w - ey_centered * ey_centered;
 
     let eig_small = 0.5 * (cxx + cyy - ((cxx - cyy) * (cxx - cyy) + 4.0 * cxy * cxy).sqrt());
 
     if let Some(lineparm) = lineparm {
-        lineparm[0] = ex as f32;
-        lineparm[1] = ey as f32;
+        // Transform centroid back to absolute coordinates
+        lineparm[0] = (ex_centered + cx) as f32;
+        lineparm[1] = (ey_centered + cy) as f32;
 
         let eig = 0.5 * (cxx + cyy + ((cxx - cyy) * (cxx - cyy) + 4.0 * cxy * cxy).sqrt());
         let nx1 = cxx - eig;
@@ -843,6 +867,10 @@ mod tests {
 
     #[test]
     fn test_quad_segment_maxima_edge_cases() {
+        // Use (0, 0) as center for simple test cases
+        let cx = 0.0;
+        let cy = 0.0;
+
         // Test 1: Edge cases - too few points, empty input, constant slope
         let gradient_infos = vec![
             GradientInfo {
@@ -861,6 +889,8 @@ mod tests {
             &gradient_infos,
             &lfps,
             &mut indices,
+            cx,
+            cy,
             &FitQuadConfig::default()
         ));
 
@@ -871,6 +901,8 @@ mod tests {
             &empty_gradient_infos,
             &empty_lfps,
             &mut indices,
+            cx,
+            cy,
             &FitQuadConfig::default()
         ));
 
@@ -889,6 +921,8 @@ mod tests {
             &constant_slope_infos,
             &constant_lfps,
             &mut indices,
+            cx,
+            cy,
             &FitQuadConfig::default()
         ));
     }
@@ -912,13 +946,19 @@ mod tests {
             .unwrap();
 
         if largest_cluster.len() >= 24 {
-            let lfps = compute_line_fit_prefix_sums(&bin, largest_cluster);
+            // Compute cluster center for numerical stability
+            let cx = largest_cluster.iter().map(|g| g.pos.x).sum::<usize>() as f64 / largest_cluster.len() as f64;
+            let cy = largest_cluster.iter().map(|g| g.pos.y).sum::<usize>() as f64 / largest_cluster.len() as f64;
+
+            let lfps = compute_line_fit_prefix_sums(&bin, largest_cluster, cx, cy);
             let mut indices = [0; 4];
 
             let result = quad_segment_maxima(
                 largest_cluster,
                 &lfps,
                 &mut indices,
+                cx,
+                cy,
                 &FitQuadConfig::default(),
             );
 
@@ -955,6 +995,9 @@ mod tests {
         }
 
         // Test 1: Normal case with all parameters
+        // Use (0, 0) as center since test data is already small
+        let cx = 0.0;
+        let cy = 0.0;
         let mut lineparm = [0.0f32; 4];
         let mut err = 0.0f32;
         let mut mse = 0.0f32;
@@ -963,6 +1006,8 @@ mod tests {
             &lfps,
             0,
             3,
+            cx,
+            cy,
             Some(&mut lineparm),
             Some(&mut err),
             Some(&mut mse),
@@ -982,6 +1027,8 @@ mod tests {
             &lfps,
             1,
             1,
+            cx,
+            cy,
             Some(&mut lineparm2),
             Some(&mut err2),
             Some(&mut mse2),
@@ -1002,6 +1049,8 @@ mod tests {
             &lfps,
             0,
             10,
+            cx,
+            cy,
             Some(&mut lineparm3),
             Some(&mut err3),
             Some(&mut mse3),
@@ -1022,6 +1071,8 @@ mod tests {
             &lfps,
             3,
             1,
+            cx,
+            cy,
             Some(&mut lineparm4),
             Some(&mut err4),
             Some(&mut mse4),
@@ -1033,7 +1084,7 @@ mod tests {
         assert!(mse4 >= 0.0);
 
         // Test 5: No output parameters (should not crash)
-        fit_line(&lfps, 0, 3, None, None, None);
+        fit_line(&lfps, 0, 3, cx, cy, None, None, None);
     }
 
     #[test]
@@ -1050,13 +1101,16 @@ mod tests {
         let img = Image::<Pixel, 1, _>::from_size_val(size, Pixel::White, CpuAllocator).unwrap();
 
         // Test 1: Single point
+        // Use (0, 0) as center so test expectations remain simple
+        let cx = 0.0;
+        let cy = 0.0;
         let gradient_infos = vec![GradientInfo {
             pos: Point2d { x: 1, y: 2 },
             gx: GradientDirection::TowardsWhite,
             gy: GradientDirection::TowardsBlack,
             slope: 0.0,
         }];
-        let lfps = compute_line_fit_prefix_sums(&img, &gradient_infos);
+        let lfps = compute_line_fit_prefix_sums(&img, &gradient_infos, cx, cy);
         assert_eq!(lfps.len(), 1);
         // The weighted mean should be close to the point's position (scaled by 0.5 + delta)
         let expected_x = 1.0 * 0.5 + 0.5;
@@ -1085,7 +1139,7 @@ mod tests {
                 slope: 0.0,
             },
         ];
-        let lfps = compute_line_fit_prefix_sums(&img, &gradient_infos);
+        let lfps = compute_line_fit_prefix_sums(&img, &gradient_infos, cx, cy);
         assert_eq!(lfps.len(), 3);
         // The last element should be the sum of all previous
         let last = &lfps[2];
@@ -1105,7 +1159,7 @@ mod tests {
 
         // Test 3: Empty input
         let gradient_infos = vec![];
-        let lfps = compute_line_fit_prefix_sums(&img, &gradient_infos);
+        let lfps = compute_line_fit_prefix_sums(&img, &gradient_infos, cx, cy);
         assert_eq!(lfps.len(), 0);
     }
 }
