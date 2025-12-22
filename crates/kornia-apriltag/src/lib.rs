@@ -620,4 +620,169 @@ mod tests {
 
         Ok(())
     }
+
+}
+
+// Test image1.jpg detections on all architectures (separate from aarch64-excluded tests)
+#[cfg(test)]
+mod image1_tests {
+    use kornia_image::{allocator::CpuAllocator, Image};
+    use kornia_imgproc::color::gray_from_rgb_u8;
+    use kornia_io::jpeg::read_image_jpeg_rgb8;
+
+    use crate::{family::TagFamilyKind, AprilTagDecoder, DecodeTagsConfig};
+
+    #[test]
+    fn test_image1_detections() -> Result<(), Box<dyn std::error::Error>> {
+        // Define expected detections structure matching the JSON format
+        #[derive(serde::Deserialize)]
+        struct ExpectedCorner {
+            x: f32,
+            y: f32,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct ExpectedDetection {
+            tag_id: u16,
+            #[allow(dead_code)]
+            tag_family: String,
+            corners: [ExpectedCorner; 4],
+        }
+
+        #[derive(serde::Deserialize)]
+        struct ExpectedDetections {
+            detections: Vec<ExpectedDetection>,
+        }
+
+        // Load and convert the test image
+        let img_path = "../../tests/image1.jpg";
+        let img_rgb = read_image_jpeg_rgb8(img_path)?;
+        let mut img_gray = Image::from_size_val(img_rgb.size(), 0, CpuAllocator)?;
+        gray_from_rgb_u8(&img_rgb, &mut img_gray)?;
+
+        // Configure decoder and run detection
+        let config = DecodeTagsConfig::new(vec![TagFamilyKind::TagStandard52H13]);
+        let mut decoder = AprilTagDecoder::new(config, img_gray.size())?;
+        let detections = decoder.decode(&img_gray)?;
+
+        // Load expected detections from JSON
+        let json_path = "../../tests/image1.json";
+        let json_content = std::fs::read_to_string(json_path)?;
+        let expected: ExpectedDetections = serde_json::from_str(&json_content)?;
+
+        // Print detection information for inspection
+        println!("\n=== AprilTag Detection Results for image1.jpg ===");
+        println!("Platform: {}", std::env::consts::OS);
+        println!("Architecture: {}", std::env::consts::ARCH);
+        println!("Total detections: {}", detections.len());
+        println!("Expected detections: {}", expected.detections.len());
+        println!();
+
+        for (i, det) in detections.iter().enumerate() {
+            println!("Detection #{}", i + 1);
+            println!("  Tag ID: {}", det.id);
+            println!("  Tag Family: {:?}", det.tag_family_kind);
+            println!("  Hamming: {}", det.hamming);
+            println!("  Decision Margin: {:.2}", det.decision_margin);
+            println!("  Center: ({:.2}, {:.2})", det.center.x, det.center.y);
+            println!("  Corners:");
+            for (j, corner) in det.quad.corners.iter().enumerate() {
+                println!("    [{}]: ({:.6}, {:.6})", j, corner.x, corner.y);
+            }
+            println!();
+        }
+
+        // Verify we detected the expected number of tags
+        assert_eq!(
+            detections.len(),
+            expected.detections.len(),
+            "Expected {} detections but found {}",
+            expected.detections.len(),
+            detections.len()
+        );
+
+        // Verify all detected tags are of the correct family
+        for detection in &detections {
+            assert_eq!(
+                detection.tag_family_kind,
+                TagFamilyKind::TagStandard52H13,
+                "Expected tagStandard52h13 but got {:?}",
+                detection.tag_family_kind
+            );
+        }
+
+        // Create a set of expected tag IDs for verification
+        let expected_ids: std::collections::HashSet<u16> =
+            expected.detections.iter().map(|d| d.tag_id).collect();
+        let detected_ids: std::collections::HashSet<u16> =
+            detections.iter().map(|d| d.id).collect();
+
+        // Verify all expected tags were detected
+        for expected_id in &expected_ids {
+            assert!(
+                detected_ids.contains(expected_id),
+                "Expected tag ID {} was not detected",
+                expected_id
+            );
+        }
+
+        // Verify no unexpected tags were detected
+        for detected_id in &detected_ids {
+            assert!(
+                expected_ids.contains(detected_id),
+                "Unexpected tag ID {} was detected",
+                detected_id
+            );
+        }
+
+        // Verify corner positions are within tolerance
+        // Note: Corner order may differ between implementations, so we check if all corners
+        // are present regardless of order
+        const CORNER_TOLERANCE: f32 = 2.0; // pixels
+
+        for expected_det in &expected.detections {
+            // Find matching detection
+            let actual_det = detections
+                .iter()
+                .find(|d| d.id == expected_det.tag_id)
+                .unwrap_or_else(|| {
+                    panic!("Could not find detection for tag {}", expected_det.tag_id)
+                });
+
+            println!("Verifying corners for tag ID {}", expected_det.tag_id);
+
+            // Check that each expected corner can be matched to an actual corner within tolerance
+            for (i, expected_corner) in expected_det.corners.iter().enumerate() {
+                let mut found_match = false;
+
+                for (j, actual_corner) in actual_det.quad.corners.iter().enumerate() {
+                    let dx = (expected_corner.x - actual_corner.x).abs();
+                    let dy = (expected_corner.y - actual_corner.y).abs();
+
+                    if dx <= CORNER_TOLERANCE && dy <= CORNER_TOLERANCE {
+                        println!(
+                            "  Expected corner [{}] ({:.6}, {:.6}) matched actual corner [{}] ({:.6}, {:.6}) - Delta ({:.6}, {:.6})",
+                            i, expected_corner.x, expected_corner.y, j, actual_corner.x, actual_corner.y, dx, dy
+                        );
+                        found_match = true;
+                        break;
+                    }
+                }
+
+                assert!(
+                    found_match,
+                    "Expected corner {} ({:.2}, {:.2}) for tag {} could not be matched to any actual corner within tolerance {:.2}",
+                    i,
+                    expected_corner.x,
+                    expected_corner.y,
+                    expected_det.tag_id,
+                    CORNER_TOLERANCE
+                );
+            }
+        }
+
+        println!("✓ All detections verified successfully!");
+
+        Ok(())
+    }
 }
