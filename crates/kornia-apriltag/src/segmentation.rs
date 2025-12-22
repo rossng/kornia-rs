@@ -177,7 +177,6 @@ pub fn find_gradient_clusters<A: ImageAllocator>(
                 return;
             }
 
-            let mut any_connected = false;
             let mut do_conn =
                 |dx: isize, dy: isize, neighbor_i: usize, any_connected: &mut bool| {
                     let neighbor_pixel = src_slice[neighbor_i];
@@ -217,18 +216,19 @@ pub fn find_gradient_clusters<A: ImageAllocator>(
                     }
                 };
 
-            do_conn(1, 0, i + 1, &mut any_connected);
-            do_conn(0, 1, i + src.width(), &mut any_connected);
+            let mut _connected = false;
+            do_conn(1, 0, i + 1, &mut _connected);
+            do_conn(0, 1, i + src.width(), &mut _connected);
 
             if !connected_last {
-                do_conn(-1, 1, i + src.width() - 1, &mut any_connected)
+                do_conn(-1, 1, i + src.width() - 1, &mut _connected)
             }
 
-            any_connected = false;
+            // Reset and check only (1,1)
+            let mut connected = false;
+            do_conn(1, 1, i + src.width() + 1, &mut connected);
 
-            do_conn(1, 1, i + src.width() + 1, &mut any_connected);
-
-            connected_last = any_connected;
+            connected_last = connected;
         });
     });
 }

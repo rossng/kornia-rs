@@ -628,6 +628,9 @@ fn quad_decode<A: ImageAllocator>(
     entry: &mut QuickDecodeEntry,
     gray_model_pair: &mut GrayModelPair,
 ) -> Option<f32> {
+    // Reset gray models for this quad (critical - models must be fresh for each quad!)
+    gray_model_pair.reset();
+
     struct Pattern {
         start_x: f32,
         start_y: f32,
@@ -698,7 +701,7 @@ fn quad_decode<A: ImageAllocator>(
             start_y: tag_family.width_at_border as f32 + 0.5,
             step_x: 1.0,
             step_y: 0.0,
-            is_white: false,
+            is_white: true,
         },
 
         // bottom black row
