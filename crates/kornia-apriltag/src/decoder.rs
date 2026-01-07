@@ -104,11 +104,79 @@ pub struct QuickDecodeEntry {
     pub rotation: u8,
 }
 
+/// A memory-efficient sparse lookup table using offset-based indexing.
+///
+/// Instead of `Vec<Vec<u16>>` where each bucket is a separate heap allocation,
+/// this stores all candidate IDs contiguously in a single `data` array,
+/// with `offsets` marking where each bucket's data begins.
+///
+/// Memory layout example (4 buckets, some empty):
+/// ```text
+/// offsets: [0, 2, 2, 5, 7]  // bucket 1 is empty (offset[1] == offset[2])
+///                           // extra sentinel at end for easy length calculation
+/// data:    [id0, id1, id2, id3, id4, id5, id6]
+///           ^bucket0^  ^--bucket2--^  ^bucket3^
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+struct CompactSparseTable {
+    /// Offset into `data` where each bucket starts.
+    /// Length is `capacity + 1` (extra sentinel for easy length calculation).
+    /// Using u32 since we'll never have > 4 billion entries.
+    offsets: Vec<u32>,
+
+    /// All candidate IDs stored contiguously.
+    data: Vec<u16>,
+}
+
+impl CompactSparseTable {
+    /// Creates a new compact table from bucket data.
+    ///
+    /// # Arguments
+    /// * `capacity` - Number of buckets (2^chunk_size)
+    /// * `entries` - Slice of (bucket_index, candidate_id) pairs, sorted by bucket_index
+    fn new(capacity: usize, entries: &mut [(usize, u16)]) -> Self {
+        // Sort entries by bucket index for sequential access
+        entries.sort_unstable_by_key(|(bucket, _)| *bucket);
+
+        // Count entries per bucket
+        let mut counts = vec![0u32; capacity];
+        for &(bucket_idx, _) in entries.iter() {
+            counts[bucket_idx] += 1;
+        }
+
+        // Build offset array (prefix sum)
+        let mut offsets = Vec::with_capacity(capacity + 1);
+        offsets.push(0);
+        let mut running_sum = 0u32;
+        for count in &counts {
+            running_sum += count;
+            offsets.push(running_sum);
+        }
+
+        // Extract just the IDs (already sorted by bucket due to sort above)
+        let data: Vec<u16> = entries.iter().map(|(_, id)| *id).collect();
+
+        Self { offsets, data }
+    }
+
+    /// Returns a slice of candidate IDs in the given bucket.
+    #[inline]
+    fn get(&self, bucket_idx: usize) -> &[u16] {
+        let start = self.offsets[bucket_idx] as usize;
+        let end = self.offsets[bucket_idx + 1] as usize;
+        &self.data[start..end]
+    }
+}
+
 /// A lookup table for fast Hamming distance decoding.
+///
+/// Uses compact sparse tables instead of nested Vecs for better memory
+/// efficiency and cache locality. Each table stores candidate IDs contiguously
+/// with an offset array for O(1) bucket access.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuickDecode {
-    /// Four lookup tables, one for each chunk position.
-    tables: [Vec<Vec<u16>>; 4],
+    /// Four compact lookup tables, one for each chunk position.
+    tables: [CompactSparseTable; 4],
 
     /// The number of bits to shift right to extract each chunk.
     shifts: [usize; 4],
@@ -141,25 +209,21 @@ impl QuickDecode {
         let chunk_size = (nbits + 3) / 4;
         let capacity = 1 << chunk_size;
         let chunk_mask = capacity - 1;
-
-        let mut tables = [
-            vec![Vec::new(); capacity],
-            vec![Vec::new(); capacity],
-            vec![Vec::new(); capacity],
-            vec![Vec::new(); capacity],
-        ];
-
         let shifts = [0, chunk_size, chunk_size * 2, chunk_size * 3];
 
-        for (i, &code) in valid_codes.iter().enumerate() {
-            let id = i as u16;
-
-            for chunk_idx in 0..4 {
-                let shift = shifts[chunk_idx];
-                let val = (code >> shift) & chunk_mask;
-                tables[chunk_idx][val].push(id);
-            }
-        }
+        // Build each table
+        let tables = std::array::from_fn(|chunk_idx| {
+            let shift = shifts[chunk_idx];
+            let mut entries: Vec<(usize, u16)> = valid_codes
+                .iter()
+                .enumerate()
+                .map(|(i, &code)| {
+                    let bucket = (code >> shift) & chunk_mask;
+                    (bucket, i as u16)
+                })
+                .collect();
+            CompactSparseTable::new(capacity, &mut entries)
+        });
 
         Self {
             tables,
@@ -181,22 +245,20 @@ impl QuickDecode {
     /// Returns `Some(QuickDecodeEntry)` if the code is found within `max_hamming`, or `None` otherwise.
     pub fn decode(&self, observed_code: usize, valid_codes: &[usize]) -> Option<QuickDecodeEntry> {
         for i in 0..4 {
-            let val = (observed_code >> self.shifts[i]) & self.chunk_mask;
+            let bucket = (observed_code >> self.shifts[i]) & self.chunk_mask;
+            let candidates = self.tables[i].get(bucket);
 
-            if let Some(candidates) = self.tables[i].get(val) {
-                for &id in candidates {
-                    let perfect_code = valid_codes[id as usize];
+            for &id in candidates {
+                let perfect_code = valid_codes[id as usize];
+                let dist = (observed_code ^ perfect_code).count_ones() as u8;
 
-                    let dist = (observed_code ^ perfect_code).count_ones() as u8;
-
-                    if dist <= self.max_hamming {
-                        return Some(QuickDecodeEntry {
-                            rcode: observed_code,
-                            id,
-                            hamming: dist,
-                            rotation: 0,
-                        });
-                    }
+                if dist <= self.max_hamming {
+                    return Some(QuickDecodeEntry {
+                        rcode: observed_code,
+                        id,
+                        hamming: dist,
+                        rotation: 0,
+                    });
                 }
             }
         }
